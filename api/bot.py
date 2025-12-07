@@ -1,5 +1,9 @@
 import os
 import asyncio
+import smtplib
+import json
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 from flask import Flask, request
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -15,14 +19,22 @@ import google.generativeai as genai
 from pymongo import MongoClient
 from io import BytesIO
 
-# --- ENVIRONMENT VARIABLES ---
+# --- CONFIGURATION ---
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 MONGO_URI = os.environ.get("MONGO_URI")
 
+# Multiple Senders Load Karna
+SENDER_LIST_JSON = os.environ.get("SENDER_LIST")
+try:
+    SENDER_ACCOUNTS = json.loads(SENDER_LIST_JSON) if SENDER_LIST_JSON else []
+except:
+    SENDER_ACCOUNTS = []
+    print("Error loading SENDER_LIST from .env")
+
 # --- SETUP ---
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-2.5-flash')
+model = genai.GenerativeModel('gemini-1.5-flash', generation_config={"response_mime_type": "application/json"})
 
 # MongoDB Connection
 try:
@@ -31,14 +43,13 @@ try:
     users_collection = db['user_sessions']
 except:
     users_collection = None
-    print("MongoDB Connection Failed - Check URI")
 
 app = Flask(__name__)
 
-# States for Conversation
+# States
 ASK_LINK, ASK_ID, ASK_CONTENT = range(3)
 
-# --- HELPER FUNCTIONS ---
+# --- HELPERS ---
 async def get_image_data(file_id, bot):
     file = await bot.get_file(file_id)
     f = BytesIO()
@@ -56,25 +67,22 @@ def get_from_db(user_id):
 
 # --- HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "👋 **Bot Ready!**\nSend me a screenshot of a Telegram Group.",
-        parse_mode="Markdown"
-    )
+    await update.message.reply_text(f"👋 **Bot Ready!**\nloaded {len(SENDER_ACCOUNTS)} Sender Accounts.\nPhoto bhejo shuru karne ke liye.")
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     photo_file_id = update.message.photo[-1].file_id
-    
     update_db(user_id, {"photo_id": photo_file_id})
     
     keyboard = [
         [InlineKeyboardButton("⚡ Short Report", callback_data="short"),
          InlineKeyboardButton("📊 Long Report", callback_data="long")],
-        [InlineKeyboardButton("✉️ Draft Legal Email", callback_data="start_email")]
+        [InlineKeyboardButton("✉️ Mass Report Email", callback_data="start_email")]
     ]
-    await update.message.reply_text("Screenshot Received! Choose action:", reply_markup=InlineKeyboardMarkup(keyboard))
+    await update.message.reply_text("Screenshot Saved! Action select karo:", reply_markup=InlineKeyboardMarkup(keyboard))
     return ConversationHandler.END
 
+# --- REPORT LOGIC ---
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -86,27 +94,24 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return ASK_LINK
 
     await query.answer()
-    await query.edit_message_text(f"⏳ Analyzing for {mode}...")
-    
+    await query.edit_message_text(f"⏳ Analyzing...")
     try:
-        user_data = get_from_db(user_id)
-        if not user_data or 'photo_id' not in user_data:
-            await query.edit_message_text("❌ Photo Session Expired. Send again.")
-            return
-
-        img_data = await get_image_data(user_data['photo_id'], context.bot)
-        prompt = "Analyze this image. Give a short safety verdict." if mode == "short" else "Analyze this image. Give a detailed professional report."
+        data = get_from_db(user_id)
+        img = await get_image_data(data['photo_id'], context.bot)
         
-        response = model.generate_content([{'mime_type': 'image/jpeg', 'data': img_data}, prompt])
+        text_model = genai.GenerativeModel('gemini-1.5-flash') 
+        prompt = "Short verdict" if mode == "short" else "Detailed analysis"
+        response = text_model.generate_content([{'mime_type': 'image/jpeg', 'data': img}, prompt])
+        
         await query.edit_message_text(f"✅ Report:\n\n`{response.text}`", parse_mode="Markdown")
     except Exception as e:
         await query.edit_message_text(f"Error: {str(e)}")
     return ConversationHandler.END
 
-# --- EMAIL STEPS ---
+# --- EMAIL WIZARD ---
 async def step_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
     update_db(update.message.from_user.id, {"gc_link": update.message.text})
-    await update.message.reply_text("📝 **Step 2:** Chat ID bhejo (ya Skip likho).")
+    await update.message.reply_text("📝 **Step 2:** Chat ID bhejo (ya Skip).")
     return ASK_ID
 
 async def step_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -117,27 +122,106 @@ async def step_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def step_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     reason = update.message.text
-    msg = await update.message.reply_text("✍️ Drafting Email...")
+    msg = await update.message.reply_text("🤖 Generating Email Draft...")
     
     try:
         data = get_from_db(user_id)
-        img_data = await get_image_data(data['photo_id'], context.bot)
+        img = await get_image_data(data['photo_id'], context.bot)
         
-        prompt = f"Write a legal takedown email for Telegram Abuse. Link: {data.get('gc_link')}, ID: {data.get('chat_id')}, Reason: {reason}. Subject & Body."
-        response = model.generate_content([{'mime_type': 'image/jpeg', 'data': img_data}, prompt])
+        prompt = (
+            f"Write a legal takedown email regarding Telegram Group. "
+            f"Link: {data.get('gc_link')}, ID: {data.get('chat_id')}, Reason: {reason}. "
+            f"Determine recipient (abuse/dmca). "
+            f"Output JSON: {{'to': 'email', 'subject': 'sub', 'body': 'text'}}"
+        )
+
+        response = model.generate_content([{'mime_type': 'image/jpeg', 'data': img}, prompt])
+        email_data = json.loads(response.text)
         
-        await msg.edit_text(f"📧 **Draft:**\n\n`{response.text}`", parse_mode="Markdown")
+        update_db(user_id, {"draft": email_data})
+        
+        # Show how many accounts will send
+        count = len(SENDER_ACCOUNTS)
+        keyboard = [[InlineKeyboardButton(f"🚀 Mass Send (from {count} IDs)", callback_data="send_mass")]]
+        
+        await msg.edit_text(
+            f"📧 **Draft Ready!**\n"
+            f"**To:** `{email_data['to']}`\n"
+            f"**Subject:** `{email_data['subject']}`\n\n"
+            f"Clicking below will send this email from **{count} different accounts** one by one.",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
     except Exception as e:
         await msg.edit_text(f"Error: {str(e)}")
+        return ConversationHandler.END
+        
     return ConversationHandler.END
+
+# --- MASS SENDING LOGIC ---
+async def send_email_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    user_id = query.from_user.id
+    
+    if query.data != "send_mass": return
+
+    await query.answer()
+    
+    # Check if accounts exist
+    if not SENDER_ACCOUNTS:
+        await query.edit_message_text("❌ No Sender Accounts found in .env (SENDER_LIST)!")
+        return
+
+    await query.edit_message_text(f"🚀 **Starting Mass Report...**\nTarget: {len(SENDER_ACCOUNTS)} Emails")
+    
+    user_data = get_from_db(user_id)
+    draft = user_data.get('draft')
+    
+    status_log = "**📢 Report Status:**\n\n"
+    success_count = 0
+    
+    # Loop through all accounts
+    for idx, account in enumerate(SENDER_ACCOUNTS):
+        sender_email = account['email']
+        sender_pass = account['pass']
+        
+        try:
+            # Update UI for progress
+            if idx > 0 and idx % 2 == 0: # Har 2 email ke baad UI update karo
+                await query.edit_message_text(f"🚀 Sending... ({idx}/{len(SENDER_ACCOUNTS)} done)")
+
+            msg = MIMEMultipart()
+            msg['From'] = sender_email
+            msg['To'] = draft['to']
+            msg['Subject'] = draft['subject']
+            msg.attach(MIMEText(draft['body'], 'plain'))
+
+            server = smtplib.SMTP('smtp.gmail.com', 587)
+            server.starttls()
+            server.login(sender_email, sender_pass)
+            server.send_message(msg)
+            server.quit()
+            
+            status_log += f"✅ Sent via {sender_email}\n"
+            success_count += 1
+            
+        except Exception as e:
+            status_log += f"❌ Failed {sender_email} (Error)\n"
+
+    # Final Report
+    await query.edit_message_text(
+        f"{status_log}\n"
+        f"➖➖➖➖➖➖\n"
+        f"🎯 **Total Sent:** {success_count}/{len(SENDER_ACCOUNTS)}",
+        parse_mode="Markdown"
+    )
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("❌ Cancelled.")
     return ConversationHandler.END
 
-# --- APP BUILDER ---
+# --- APP SETUP ---
 ptb_app = Application.builder().token(TOKEN).build()
-
 conv = ConversationHandler(
     entry_points=[CallbackQueryHandler(report_callback)],
     states={
@@ -148,36 +232,25 @@ conv = ConversationHandler(
     fallbacks=[CommandHandler('cancel', cancel)],
     allow_reentry=True
 )
-
 ptb_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
+ptb_app.add_handler(CallbackQueryHandler(send_email_callback, pattern="^send_mass$"))
 ptb_app.add_handler(conv)
 ptb_app.add_handler(CommandHandler("start", start))
 
-# --- WEBHOOK (FIXED LOGIC) ---
 @app.route("/", methods=["POST"])
 def webhook():
     if request.method == "POST":
         async def handle_update():
-            # 1. Initialize Application (Zaroori hai v20+ ke liye)
-            if not ptb_app._initialized:
-                await ptb_app.initialize()
-            
-            # 2. Process Update
+            if not ptb_app._initialized: await ptb_app.initialize()
             update = Update.de_json(request.get_json(force=True), ptb_app.bot)
             await ptb_app.process_update(update)
-            
-            # 3. Shutdown to prevent loop errors in serverless
             await ptb_app.shutdown()
-
         try:
             asyncio.run(handle_update())
             return "OK"
-        except Exception as e:
-            print(f"Error: {e}")
-            return "Error", 500
-            
-    return "Bot is Running"
+        except: return "Error", 500
+    return "Running"
 
 if __name__ == "__main__":
     app.run(port=5000)
-    
+           
