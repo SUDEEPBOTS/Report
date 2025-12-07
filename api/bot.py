@@ -22,7 +22,7 @@ MONGO_URI = os.environ.get("MONGO_URI")
 
 # --- SETUP ---
 genai.configure(api_key=GEMINI_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+model = genai.GenerativeModel('gemini-2.5-flash')
 
 # MongoDB Connection
 try:
