@@ -2,6 +2,7 @@ import os
 import asyncio
 import smtplib
 import json
+import random
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from flask import Flask, request
@@ -49,7 +50,14 @@ app = Flask(__name__)
 # States
 ASK_LINK, ASK_ID, ASK_CONTENT = range(3)
 
-# --- HELPERS ---
+# --- FAKE NAMES LIST ---
+FAKE_NAMES = [
+    "Alex Smith", "John Miller", "Sarah Jenkins", "David Ross", "Michael B.",
+    "James Carter", "Robert H.", "Security Analyst", "Legal Officer", "T. Anderson",
+    "Chris Evans", "Daniel Craig", "Emma Watson", "Steve Rogers"
+]
+
+# --- HELPER FUNCTIONS ---
 async def get_image_data(file_id, bot):
     file = await bot.get_file(file_id)
     f = BytesIO()
@@ -67,7 +75,12 @@ def get_from_db(user_id):
 
 # --- HANDLERS ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(f"👋 **Bot Ready!**\nloaded {len(SENDER_ACCOUNTS)} Sender Accounts.\nPhoto bhejo shuru karne ke liye.")
+    # User start karega toh uska message delete karke clean welcome denge
+    try:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
+    except: pass
+    
+    await update.message.reply_text(f"👋 **Bot Ready!**\nLoaded {len(SENDER_ACCOUNTS)} Sender Accounts.\nPhoto bhejo shuru karne ke liye.")
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -108,29 +121,61 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"Error: {str(e)}")
     return ConversationHandler.END
 
-# --- EMAIL WIZARD ---
+# --- EMAIL WIZARD (AUTO-DELETE ADDED) ---
+
 async def step_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1. Save Data
     update_db(update.message.from_user.id, {"gc_link": update.message.text})
-    await update.message.reply_text("📝 **Step 2:** Chat ID bhejo (ya Skip).")
+    
+    # 2. DELETE USER MESSAGE (Clean Up)
+    try:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
+    except: pass
+
+    # 3. Next Question
+    # Purna message edit nahi kar sakte kyunki wo text tha, naya bhejenge
+    await update.message.reply_text("✅ Link Saved.\n\n📝 **Step 2:** Chat ID bhejo (ya Skip).")
     return ASK_ID
 
 async def step_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    # 1. Save Data
     update_db(update.message.from_user.id, {"chat_id": update.message.text})
-    await update.message.reply_text("📝 **Step 3:** Reason/Evidence batao.")
+    
+    # 2. DELETE USER MESSAGE (Clean Up)
+    try:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
+    except: pass
+
+    # 3. Next Question
+    await update.message.reply_text("✅ ID Saved.\n\n📝 **Step 3:** Reason/Evidence batao.")
     return ASK_CONTENT
 
 async def step_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     reason = update.message.text
+    
+    # 1. DELETE USER MESSAGE (Clean Up)
+    try:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
+    except: pass
+
     msg = await update.message.reply_text("🤖 Generating Email Draft...")
     
     try:
         data = get_from_db(user_id)
         img = await get_image_data(data['photo_id'], context.bot)
         
+        # Logic: Clean Link & Random Name
+        raw_link = data.get('gc_link', '')
+        clean_link = raw_link.replace("https://", "").replace("http://", "")
+        random_name = random.choice(FAKE_NAMES)
+        
         prompt = (
             f"Write a legal takedown email regarding Telegram Group. "
-            f"Link: {data.get('gc_link')}, ID: {data.get('chat_id')}, Reason: {reason}. "
+            f"Target Group Link: {clean_link} (Keep format exactly as: t.me/...), "
+            f"Chat ID: {data.get('chat_id')}, Reason: {reason}. "
+            f"IMPORTANT: Sign off the email with the name: '{random_name}'. "
+            f"IMPORTANT: Do NOT use 'https://' in any Telegram links inside the body, use 't.me/...' format only. "
             f"Determine recipient (abuse/dmca). "
             f"Output JSON: {{'to': 'email', 'subject': 'sub', 'body': 'text'}}"
         )
@@ -140,7 +185,6 @@ async def step_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         update_db(user_id, {"draft": email_data})
         
-        # Show how many accounts will send
         count = len(SENDER_ACCOUNTS)
         keyboard = [[InlineKeyboardButton(f"🚀 Mass Send (from {count} IDs)", callback_data="send_mass")]]
         
@@ -148,6 +192,7 @@ async def step_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"📧 **Draft Ready!**\n"
             f"**To:** `{email_data['to']}`\n"
             f"**Subject:** `{email_data['subject']}`\n\n"
+            f"👇 **Body Preview:**\n{email_data['body'][:300]}...\n\n"
             f"Clicking below will send this email from **{count} different accounts** one by one.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
@@ -167,7 +212,6 @@ async def send_email_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
 
     await query.answer()
     
-    # Check if accounts exist
     if not SENDER_ACCOUNTS:
         await query.edit_message_text("❌ No Sender Accounts found in .env (SENDER_LIST)!")
         return
@@ -180,14 +224,12 @@ async def send_email_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     status_log = "**📢 Report Status:**\n\n"
     success_count = 0
     
-    # Loop through all accounts
     for idx, account in enumerate(SENDER_ACCOUNTS):
         sender_email = account['email']
         sender_pass = account['pass']
         
         try:
-            # Update UI for progress
-            if idx > 0 and idx % 2 == 0: # Har 2 email ke baad UI update karo
+            if idx > 0 and idx % 2 == 0:
                 await query.edit_message_text(f"🚀 Sending... ({idx}/{len(SENDER_ACCOUNTS)} done)")
 
             msg = MIMEMultipart()
@@ -208,7 +250,6 @@ async def send_email_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
         except Exception as e:
             status_log += f"❌ Failed {sender_email} (Error)\n"
 
-    # Final Report
     await query.edit_message_text(
         f"{status_log}\n"
         f"➖➖➖➖➖➖\n"
@@ -217,6 +258,9 @@ async def send_email_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
     )
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
+    except: pass
     await update.message.reply_text("❌ Cancelled.")
     return ConversationHandler.END
 
@@ -253,4 +297,3 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(port=5000)
-           
