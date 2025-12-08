@@ -24,7 +24,14 @@ from io import BytesIO
 TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 GEMINI_KEY = os.environ.get("GEMINI_API_KEY")
 MONGO_URI = os.environ.get("MONGO_URI")
-ADMIN_ID = 6356015122
+
+# Multiple Senders Load Karna
+SENDER_LIST_JSON = os.environ.get("SENDER_LIST")
+try:
+    SENDER_ACCOUNTS = json.loads(SENDER_LIST_JSON) if SENDER_LIST_JSON else []
+except:
+    SENDER_ACCOUNTS = []
+    print("Error loading SENDER_LIST from .env")
 
 # --- SETUP ---
 genai.configure(api_key=GEMINI_KEY)
@@ -35,44 +42,22 @@ try:
     mongo_client = MongoClient(MONGO_URI)
     db = mongo_client['tg_bot_db']
     users_collection = db['user_sessions']
-    senders_collection = db['sender_accounts']
 except:
     users_collection = None
-    senders_collection = None
 
 app = Flask(__name__)
 
 # States
 ASK_LINK, ASK_ID, ASK_CONTENT = range(3)
-ADMIN_ASK_EMAIL, ADMIN_ASK_PASS = range(3, 5)
 
-# Fake Names
+# --- FAKE NAMES LIST ---
 FAKE_NAMES = [
     "Alex Smith", "John Miller", "Sarah Jenkins", "David Ross", "Michael B.",
-    "James Carter", "Robert H.", "Security Analyst", "Legal Officer"
+    "James Carter", "Robert H.", "Security Analyst", "Legal Officer", "T. Anderson",
+    "Chris Evans", "Daniel Craig", "Emma Watson", "Steve Rogers"
 ]
 
 # --- HELPER FUNCTIONS ---
-
-def mask_email(email):
-    try:
-        user, domain = email.split('@')
-        if len(user) > 3:
-            return f"{user[:3]}***@{domain}"
-        return f"***@{domain}"
-    except:
-        return email
-
-def get_senders():
-    if senders_collection is not None:
-        return list(senders_collection.find({}))
-    return []
-
-async def clean_chat(context, chat_id, message_id):
-    try:
-        await context.bot.delete_message(chat_id=chat_id, message_id=message_id)
-    except: pass
-
 async def get_image_data(file_id, bot):
     file = await bot.get_file(file_id)
     f = BytesIO()
@@ -89,85 +74,13 @@ def get_from_db(user_id):
     return {}
 
 # --- HANDLERS ---
-
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await clean_chat(context, update.message.chat_id, update.message.message_id)
-    sender_count = len(get_senders())
-    await update.message.reply_text(f"👋 **Bot Ready!**\nActive Senders: {sender_count}\nPhoto bhejo report ke liye.")
-
-# --- ADMIN PANEL ---
-
-async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    await clean_chat(context, update.message.chat_id, update.message.message_id)
-
-    if user_id != ADMIN_ID: return
-
-    senders = get_senders()
-    text = "🔐 **Admin Panel**\n\n**Saved Accounts:**\n"
-    if not senders:
-        text += "No accounts added yet."
-    else:
-        for acc in senders:
-            text += f"• `{mask_email(acc['email'])}`\n"
-
-    keyboard = [[InlineKeyboardButton("➕ Add New Account", callback_data="add_acc")]]
-    msg = await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
-    update_db(user_id, {"last_bot_msg": msg.message_id})
-
-async def admin_add_click(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    if user_id != ADMIN_ID: return
-
-    await query.answer()
+    # User start karega toh uska message delete karke clean welcome denge
     try:
-        user_data = get_from_db(user_id)
-        if 'last_bot_msg' in user_data:
-            await clean_chat(context, query.message.chat_id, user_data['last_bot_msg'])
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
     except: pass
-
-    msg = await query.message.reply_text("📧 **New Account Setup**\n\nEnter Gmail Address:")
-    update_db(user_id, {"last_bot_msg": msg.message_id})
-    return ADMIN_ASK_EMAIL
-
-async def admin_step_email(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id != ADMIN_ID: return ConversationHandler.END
     
-    email = update.message.text
-    update_db(user_id, {"temp_email": email})
-
-    user_data = get_from_db(user_id)
-    await clean_chat(context, update.message.chat_id, user_data.get('last_bot_msg'))
-    await clean_chat(context, update.message.chat_id, update.message.message_id)
-
-    msg = await update.message.reply_text(f"✅ Email: `{email}`\n\n🔑 **Enter App Password:**")
-    update_db(user_id, {"last_bot_msg": msg.message_id})
-    return ADMIN_ASK_PASS
-
-async def admin_step_pass(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    if user_id != ADMIN_ID: return ConversationHandler.END
-    
-    password = update.message.text.replace(" ", "")
-    user_data = get_from_db(user_id)
-    email = user_data.get('temp_email')
-
-    if senders_collection is not None:
-        senders_collection.update_one(
-            {"email": email}, 
-            {"$set": {"email": email, "pass": password}}, 
-            upsert=True
-        )
-
-    await clean_chat(context, update.message.chat_id, user_data.get('last_bot_msg'))
-    await clean_chat(context, update.message.chat_id, update.message.message_id)
-
-    await update.message.reply_text(f"🎉 **Success!**\nAccount Added: `{mask_email(email)}`", parse_mode="Markdown")
-    return ConversationHandler.END
-
-# --- NORMAL FLOW ---
+    await update.message.reply_text(f"👋 **Bot Ready!**\nLoaded {len(SENDER_ACCOUNTS)} Sender Accounts.\nPhoto bhejo shuru karne ke liye.")
 
 async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
@@ -182,6 +95,7 @@ async def photo_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Screenshot Saved! Action select karo:", reply_markup=InlineKeyboardMarkup(keyboard))
     return ConversationHandler.END
 
+# --- REPORT LOGIC ---
 async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
@@ -189,8 +103,7 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     if mode == "start_email":
         await query.answer()
-        msg = await query.edit_message_text("📝 **Step 1:** Group Link bhejo.")
-        update_db(user_id, {"last_bot_msg": msg.message_id})
+        await query.edit_message_text("📝 **Step 1:** Group Link bhejo.")
         return ASK_LINK
 
     await query.answer()
@@ -199,7 +112,7 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = get_from_db(user_id)
         img = await get_image_data(data['photo_id'], context.bot)
         
-        text_model = genai.GenerativeModel('gemini-2.5-flash') 
+        text_model = genai.GenerativeModel('gemini-1.5-flash') 
         prompt = "Short verdict" if mode == "short" else "Detailed analysis"
         response = text_model.generate_content([{'mime_type': 'image/jpeg', 'data': img}, prompt])
         
@@ -208,57 +121,43 @@ async def report_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(f"Error: {str(e)}")
     return ConversationHandler.END
 
+# --- EMAIL WIZARD (AUTO-DELETE ADDED) ---
+
 async def step_link(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    update_db(user_id, {"gc_link": update.message.text})
+    # 1. Save Data
+    update_db(update.message.from_user.id, {"gc_link": update.message.text})
     
-    user_data = get_from_db(user_id)
-    await clean_chat(context, update.message.chat_id, user_data.get('last_bot_msg'))
-    await clean_chat(context, update.message.chat_id, update.message.message_id)
-
-    # ADDED SKIP BUTTON HERE
-    keyboard = [[InlineKeyboardButton("⏭️ Skip Chat ID", callback_data="skip_id")]]
-    msg = await update.message.reply_text("✅ Link Saved.\n\n📝 **Step 2:** Chat ID bhejo (ya Skip).", reply_markup=InlineKeyboardMarkup(keyboard))
-    update_db(user_id, {"last_bot_msg": msg.message_id})
-    return ASK_ID
-
-# --- NEW FUNCTION FOR SKIP BUTTON ---
-async def skip_id_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    user_id = query.from_user.id
-    await query.answer()
-    
-    # Save "Not Provided"
-    update_db(user_id, {"chat_id": "Not Provided"})
-    
-    # Ghost Clean (Purana button message delete)
+    # 2. DELETE USER MESSAGE (Clean Up)
     try:
-        await clean_chat(context, query.message.chat_id, query.message.message_id)
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
     except: pass
 
-    msg = await query.message.reply_text("✅ ID Skipped.\n\n📝 **Step 3:** Reason/Evidence batao.")
-    update_db(user_id, {"last_bot_msg": msg.message_id})
-    return ASK_CONTENT
+    # 3. Next Question
+    # Purna message edit nahi kar sakte kyunki wo text tha, naya bhejenge
+    await update.message.reply_text("✅ Link Saved.\n\n📝 **Step 2:** Chat ID bhejo (ya Skip).")
+    return ASK_ID
 
 async def step_id(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.message.from_user.id
-    update_db(user_id, {"chat_id": update.message.text})
+    # 1. Save Data
+    update_db(update.message.from_user.id, {"chat_id": update.message.text})
     
-    user_data = get_from_db(user_id)
-    await clean_chat(context, update.message.chat_id, user_data.get('last_bot_msg'))
-    await clean_chat(context, update.message.chat_id, update.message.message_id)
+    # 2. DELETE USER MESSAGE (Clean Up)
+    try:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
+    except: pass
 
-    msg = await update.message.reply_text("✅ ID Saved.\n\n📝 **Step 3:** Reason/Evidence batao.")
-    update_db(user_id, {"last_bot_msg": msg.message_id})
+    # 3. Next Question
+    await update.message.reply_text("✅ ID Saved.\n\n📝 **Step 3:** Reason/Evidence batao.")
     return ASK_CONTENT
 
 async def step_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.message.from_user.id
     reason = update.message.text
     
-    user_data = get_from_db(user_id)
-    await clean_chat(context, update.message.chat_id, user_data.get('last_bot_msg'))
-    await clean_chat(context, update.message.chat_id, update.message.message_id)
+    # 1. DELETE USER MESSAGE (Clean Up)
+    try:
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
+    except: pass
 
     msg = await update.message.reply_text("🤖 Generating Email Draft...")
     
@@ -266,16 +165,18 @@ async def step_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         data = get_from_db(user_id)
         img = await get_image_data(data['photo_id'], context.bot)
         
+        # Logic: Clean Link & Random Name
         raw_link = data.get('gc_link', '')
         clean_link = raw_link.replace("https://", "").replace("http://", "")
         random_name = random.choice(FAKE_NAMES)
         
         prompt = (
             f"Write a legal takedown email regarding Telegram Group. "
-            f"Target Group Link: {clean_link} (Format: t.me/...), "
+            f"Target Group Link: {clean_link} (Keep format exactly as: t.me/...), "
             f"Chat ID: {data.get('chat_id')}, Reason: {reason}. "
-            f"Sign off with: '{random_name}'. "
-            f"Do NOT use 'https://' inside body. "
+            f"IMPORTANT: Sign off the email with the name: '{random_name}'. "
+            f"IMPORTANT: Do NOT use 'https://' in any Telegram links inside the body, use 't.me/...' format only. "
+            f"Determine recipient (abuse/dmca). "
             f"Output JSON: {{'to': 'email', 'subject': 'sub', 'body': 'text'}}"
         )
 
@@ -284,16 +185,15 @@ async def step_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         update_db(user_id, {"draft": email_data})
         
-        senders = get_senders()
-        count = len(senders)
+        count = len(SENDER_ACCOUNTS)
         keyboard = [[InlineKeyboardButton(f"🚀 Mass Send (from {count} IDs)", callback_data="send_mass")]]
         
         await msg.edit_text(
             f"📧 **Draft Ready!**\n"
             f"**To:** `{email_data['to']}`\n"
             f"**Subject:** `{email_data['subject']}`\n\n"
-            f"👇 **Body Preview:**\n{email_data['body'][:200]}...\n\n"
-            f"Clicking below will send this from **{count} accounts**.",
+            f"👇 **Body Preview:**\n{email_data['body'][:300]}...\n\n"
+            f"Clicking below will send this email from **{count} different accounts** one by one.",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -303,33 +203,34 @@ async def step_generate(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     return ConversationHandler.END
 
+# --- MASS SENDING LOGIC ---
 async def send_email_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     user_id = query.from_user.id
+    
     if query.data != "send_mass": return
 
     await query.answer()
     
-    senders = get_senders()
-    if not senders:
-        await query.edit_message_text("❌ No Sender Accounts in Database! Use /admin to add.")
+    if not SENDER_ACCOUNTS:
+        await query.edit_message_text("❌ No Sender Accounts found in .env (SENDER_LIST)!")
         return
 
-    await query.edit_message_text(f"🚀 **Starting Mass Report...**\nTarget: {len(senders)} Emails")
+    await query.edit_message_text(f"🚀 **Starting Mass Report...**\nTarget: {len(SENDER_ACCOUNTS)} Emails")
     
     user_data = get_from_db(user_id)
     draft = user_data.get('draft')
+    
     status_log = "**📢 Report Status:**\n\n"
     success_count = 0
     
-    for idx, account in enumerate(senders):
+    for idx, account in enumerate(SENDER_ACCOUNTS):
         sender_email = account['email']
         sender_pass = account['pass']
-        masked = mask_email(sender_email)
         
         try:
             if idx > 0 and idx % 2 == 0:
-                await query.edit_message_text(f"🚀 Sending... ({idx}/{len(senders)} done)")
+                await query.edit_message_text(f"🚀 Sending... ({idx}/{len(SENDER_ACCOUNTS)} done)")
 
             msg = MIMEMultipart()
             msg['From'] = sender_email
@@ -343,54 +244,41 @@ async def send_email_callback(update: Update, context: ContextTypes.DEFAULT_TYPE
             server.send_message(msg)
             server.quit()
             
-            status_log += f"✅ Sent via {masked}\n"
+            status_log += f"✅ Sent via {sender_email}\n"
             success_count += 1
-        except:
-            status_log += f"❌ Failed {masked}\n"
+            
+        except Exception as e:
+            status_log += f"❌ Failed {sender_email} (Error)\n"
 
     await query.edit_message_text(
-        f"{status_log}\n➖➖➖➖➖➖\n🎯 **Total Sent:** {success_count}/{len(senders)}",
+        f"{status_log}\n"
+        f"➖➖➖➖➖➖\n"
+        f"🎯 **Total Sent:** {success_count}/{len(SENDER_ACCOUNTS)}",
         parse_mode="Markdown"
     )
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        await clean_chat(context, update.message.chat_id, update.message.message_id)
+        await context.bot.delete_message(chat_id=update.message.chat_id, message_id=update.message.message_id)
     except: pass
     await update.message.reply_text("❌ Cancelled.")
     return ConversationHandler.END
 
-# --- WEBHOOK & APP ---
+# --- APP SETUP ---
 ptb_app = Application.builder().token(TOKEN).build()
-
-conv_handler = ConversationHandler(
+conv = ConversationHandler(
     entry_points=[CallbackQueryHandler(report_callback)],
     states={
         ASK_LINK: [MessageHandler(filters.TEXT, step_link)],
-        ASK_ID: [
-            MessageHandler(filters.TEXT, step_id),
-            CallbackQueryHandler(skip_id_callback, pattern="^skip_id$") # New Handler
-        ],
+        ASK_ID: [MessageHandler(filters.TEXT, step_id)],
         ASK_CONTENT: [MessageHandler(filters.TEXT, step_generate)]
     },
     fallbacks=[CommandHandler('cancel', cancel)],
     allow_reentry=True
 )
-
-admin_conv = ConversationHandler(
-    entry_points=[CallbackQueryHandler(admin_add_click, pattern="^add_acc$")],
-    states={
-        ADMIN_ASK_EMAIL: [MessageHandler(filters.TEXT, admin_step_email)],
-        ADMIN_ASK_PASS: [MessageHandler(filters.TEXT, admin_step_pass)]
-    },
-    fallbacks=[CommandHandler('cancel', cancel)]
-)
-
-ptb_app.add_handler(CommandHandler("admin", admin_command))
-ptb_app.add_handler(admin_conv)
 ptb_app.add_handler(MessageHandler(filters.PHOTO, photo_handler))
 ptb_app.add_handler(CallbackQueryHandler(send_email_callback, pattern="^send_mass$"))
-ptb_app.add_handler(conv_handler)
+ptb_app.add_handler(conv)
 ptb_app.add_handler(CommandHandler("start", start))
 
 @app.route("/", methods=["POST"])
@@ -409,4 +297,3 @@ def webhook():
 
 if __name__ == "__main__":
     app.run(port=5000)
-        
